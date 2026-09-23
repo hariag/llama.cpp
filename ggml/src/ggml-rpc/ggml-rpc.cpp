@@ -2257,7 +2257,11 @@ static ggml_backend_dev_t ggml_backend_rpc_reg_get_device(ggml_backend_reg_t reg
     if (ctx == nullptr) {
         GGML_ABORT("The RPC backend does not have enumerated devices - use ggml_backend_rpc_add_server instead");
     } else {
-        GGML_ASSERT(index < ctx->devices.size());
+        if (index >= ctx->devices.size()) {
+            GGML_LOG_ERROR("ggml_backend_rpc_reg_get_device: index %zu out of range (%zu devices)\n",
+                           index, ctx->devices.size());
+            return nullptr;
+        }
         return ctx->devices[index];
     }
 }
