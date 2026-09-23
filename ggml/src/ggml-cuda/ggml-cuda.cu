@@ -1335,6 +1335,425 @@ typedef void (*ggml_cuda_op_mul_mat_t)(
     const char * src1_ddq_i, float * dst_dd_i, const int64_t row_low, const int64_t row_high, const int64_t src1_ncols,
     const int64_t src1_padded_row_size, cudaStream_t stream);
 
+
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+__global__ void quantize_rowwise_i8_cuda(const float * src, int8_t * dst, float * scales, int64_t k, int64_t rows) {
+    const int64_t row = blockIdx.x;
+    const int tid     = threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+
+    __shared__ float maxima[256];
+    const float * src_row = src + row * k;
+    int8_t * dst_row      = dst + row * k;
+    float local_max       = 0.0f;
+    for (int64_t i = tid; i < k; i += blockDim.x) {
+        local_max = fmaxf(local_max, fabsf(src_row[i]));
+    }
+    maxima[tid] = local_max;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            maxima[tid] = fmaxf(maxima[tid], maxima[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    const float scale = maxima[0] / 127.0f;
+    if (tid == 0) {
+        scales[row] = scale;
+    }
+    if (scale == 0.0f) {
+        for (int64_t i = tid; i < k; i += blockDim.x) {
+            dst_row[i] = 0;
+        }
+        return;
+    }
+
+    const float inv_scale = 1.0f / scale;
+    for (int64_t i = tid; i < k; i += blockDim.x) {
+        int value  = __float2int_rn(src_row[i] * inv_scale);
+        value      = max(-127, min(127, value));
+        dst_row[i] = (int8_t)value;
+    }
+}
+
+__global__ void quantize_rowwise_i8_convrot_cuda(
+        const float * src, int8_t * dst, float * scales,
+        int64_t k, int64_t rows, int64_t dst_stride) {
+    constexpr int group_size      = 256;
+    constexpr int group_threads   = group_size / 4;
+    constexpr int groups_per_wave = 1024 / group_threads;
+
+    const int64_t row = blockIdx.x;
+    const int tid     = threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+
+    extern __shared__ float values[];
+    __shared__ float maxima[32];
+    const float * src_row = src + row * k;
+    int8_t * dst_row      = dst + row * dst_stride;
+
+    for (int64_t i = tid; i < k; i += blockDim.x) {
+        values[i] = src_row[i] * (1.0f / 16.0f);
+    }
+    __syncthreads();
+
+    const int group_lane = tid % group_threads;
+    const int wave_group = tid / group_threads;
+    const int64_t groups = k / group_size;
+    for (int64_t group_base = 0; group_base < groups; group_base += groups_per_wave) {
+        const int64_t group = group_base + wave_group;
+#pragma unroll
+        for (int stride = 1; stride < group_size; stride *= 4) {
+            if (group < groups) {
+                float * group_values = values + group * group_size;
+                const int base       = (group_lane / stride) * 4 * stride + group_lane % stride;
+                const int i0         = base;
+                const int i1         = i0 + stride;
+                const int i2         = i1 + stride;
+                const int i3         = i2 + stride;
+                const float a        = group_values[i0];
+                const float b        = group_values[i1];
+                const float c        = group_values[i2];
+                const float d        = group_values[i3];
+                group_values[i0]     =  a + b + c - d;
+                group_values[i1]     =  a + b - c + d;
+                group_values[i2]     =  a - b + c + d;
+                group_values[i3]     = -a + b + c + d;
+            }
+            __syncthreads();
+        }
+    }
+
+    float local_max = 0.0f;
+    for (int64_t i = tid; i < k; i += blockDim.x) {
+        local_max = fmaxf(local_max, fabsf(values[i]));
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+    }
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    if (lane == 0) {
+        maxima[warp] = local_max;
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        local_max = lane < blockDim.x / 32 ? maxima[lane] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+        }
+        if (lane == 0) {
+            maxima[0]  = local_max / 127.0f;
+            if (scales != nullptr) {
+                scales[row] = maxima[0];
+            } else {
+                *((float *)(dst_row + k)) = maxima[0];
+            }
+        }
+    }
+    __syncthreads();
+
+    const float row_scale = maxima[0];
+    const float inv_scale = row_scale == 0.0f ? 0.0f : 1.0f / row_scale;
+    for (int64_t i = tid; i < k; i += blockDim.x) {
+        int value  = row_scale == 0.0f ? 0 : __float2int_rn(values[i] * inv_scale);
+        value      = max(-127, min(127, value));
+        dst_row[i] = (int8_t)value;
+    }
+}
+
+__global__ void convrot_group_amax_i8_cuda(
+        const float * src, float * partial_max, int64_t k, int64_t groups, int64_t total_groups) {
+    const int64_t index = blockIdx.x;
+    const int tid       = threadIdx.x;
+    if (index >= total_groups) {
+        return;
+    }
+
+    __shared__ float values[256];
+    __shared__ float maxima[2];
+    const int64_t row   = index / groups;
+    const int64_t group = index - row * groups;
+    const float * input = src + row * k + group * 256;
+    values[tid]       = input[tid] * (1.0f / 16.0f);
+    values[tid + 64]  = input[tid + 64] * (1.0f / 16.0f);
+    values[tid + 128] = input[tid + 128] * (1.0f / 16.0f);
+    values[tid + 192] = input[tid + 192] * (1.0f / 16.0f);
+    __syncthreads();
+
+#pragma unroll
+    for (int stride = 1; stride < 256; stride *= 4) {
+        const int base   = (tid / stride) * 4 * stride + tid % stride;
+        const int i0     = base;
+        const int i1     = i0 + stride;
+        const int i2     = i1 + stride;
+        const int i3     = i2 + stride;
+        const float a    = values[i0];
+        const float b    = values[i1];
+        const float c    = values[i2];
+        const float d    = values[i3];
+        values[i0]       =  a + b + c - d;
+        values[i1]       =  a + b - c + d;
+        values[i2]       =  a - b + c + d;
+        values[i3]       = -a + b + c + d;
+        __syncthreads();
+    }
+
+    float value = fmaxf(fabsf(values[tid]), fabsf(values[tid + 64]));
+    value       = fmaxf(value, fabsf(values[tid + 128]));
+    value       = fmaxf(value, fabsf(values[tid + 192]));
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value = fmaxf(value, __shfl_down_sync(0xffffffff, value, offset));
+    }
+    if ((tid & 31) == 0) {
+        maxima[tid >> 5] = value;
+    }
+    __syncthreads();
+    if (tid == 0) {
+        partial_max[index] = fmaxf(maxima[0], maxima[1]);
+    }
+}
+
+__global__ void reduce_convrot_row_amax_i8_cuda(
+        const float * partial_max, float * scales, int64_t groups, int64_t rows) {
+    const int64_t row = blockIdx.x;
+    const int tid     = threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+
+    __shared__ float maxima[256];
+    float value = 0.0f;
+    for (int64_t group = tid; group < groups; group += blockDim.x) {
+        value = fmaxf(value, partial_max[row * groups + group]);
+    }
+    maxima[tid] = value;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            maxima[tid] = fmaxf(maxima[tid], maxima[tid + stride]);
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        scales[row] = maxima[0] / 127.0f;
+    }
+}
+
+__global__ void convrot_group_quantize_i8_cuda(
+        const float * src, int8_t * dst, const float * scales,
+        int64_t k, int64_t groups, int64_t total_groups, int64_t dst_stride) {
+    const int64_t index = blockIdx.x;
+    const int tid       = threadIdx.x;
+    if (index >= total_groups) {
+        return;
+    }
+
+    __shared__ float values[256];
+    const int64_t row   = index / groups;
+    const int64_t group = index - row * groups;
+    const float * input = src + row * k + group * 256;
+    int8_t * output     = dst + row * dst_stride + group * 256;
+    values[tid]       = input[tid] * (1.0f / 16.0f);
+    values[tid + 64]  = input[tid + 64] * (1.0f / 16.0f);
+    values[tid + 128] = input[tid + 128] * (1.0f / 16.0f);
+    values[tid + 192] = input[tid + 192] * (1.0f / 16.0f);
+    __syncthreads();
+
+#pragma unroll
+    for (int stride = 1; stride < 256; stride *= 4) {
+        const int base   = (tid / stride) * 4 * stride + tid % stride;
+        const int i0     = base;
+        const int i1     = i0 + stride;
+        const int i2     = i1 + stride;
+        const int i3     = i2 + stride;
+        const float a    = values[i0];
+        const float b    = values[i1];
+        const float c    = values[i2];
+        const float d    = values[i3];
+        values[i0]       =  a + b + c - d;
+        values[i1]       =  a + b - c + d;
+        values[i2]       =  a - b + c + d;
+        values[i3]       = -a + b + c + d;
+        __syncthreads();
+    }
+
+    const float row_scale = scales[row];
+    const float inv_scale = row_scale == 0.0f ? 0.0f : 1.0f / row_scale;
+    const int indices[4]  = { tid, tid + 64, tid + 128, tid + 192 };
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        int value = row_scale == 0.0f ? 0 : __float2int_rn(values[indices[i]] * inv_scale);
+        value     = max(-127, min(127, value));
+        output[indices[i]] = (int8_t)value;
+    }
+    if (group == 0 && tid == 0 && dst_stride != k) {
+        *((float *)(dst + row * dst_stride + k)) = row_scale;
+    }
+}
+
+__global__ void dequantize_i32_rows_cuda(
+        const int32_t * src, const float * scales, const float * weight_scales,
+        const float * bias, float * dst, int64_t n, int64_t rows) {
+    const int64_t output = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t row    = blockIdx.y;
+    if (output < n && row < rows) {
+        const int64_t index = row * n + output;
+        const float activation_scale = scales[row];
+        float value = (float)src[index] * activation_scale;
+        if (weight_scales != nullptr) {
+            value *= weight_scales[output];
+        }
+        if (bias != nullptr) {
+            value += bias[output];
+        }
+        dst[index] = value;
+    }
+}
+
+static void ggml_cuda_quantize_i8_convrot(
+        ggml_backend_cuda_context & ctx,
+        const float * src,
+        int8_t * dst,
+        float * scales,
+        int64_t k,
+        int64_t rows,
+        int64_t rows_padded,
+        int64_t dst_stride) {
+    cudaStream_t stream = ctx.stream();
+    if (rows_padded > rows) {
+        CUDA_CHECK(cudaMemsetAsync(
+            dst + dst_stride * rows, 0, (size_t)dst_stride * (rows_padded - rows), stream));
+    }
+
+    const size_t nbytes_shared = (size_t)k * sizeof(float);
+    const size_t smpbo         = ggml_cuda_info().devices[ggml_cuda_get_device()].smpbo;
+    if (nbytes_shared + 128 <= smpbo) {
+        CUDA_SET_SHARED_MEMORY_LIMIT(quantize_rowwise_i8_convrot_cuda, smpbo - 128);
+        quantize_rowwise_i8_convrot_cuda<<<rows, 1024, nbytes_shared, stream>>>(
+            src, dst, scales, k, rows, dst_stride);
+        return;
+    }
+
+    const int64_t groups       = k / 256;
+    const int64_t total_groups = rows * groups;
+    ggml_cuda_pool_alloc<float> partial_max(ctx.pool(), total_groups);
+    ggml_cuda_pool_alloc<float> packed_scales(ctx.pool());
+    float * scales_d = scales;
+    if (scales_d == nullptr) {
+        scales_d = packed_scales.alloc(rows);
+    }
+    convrot_group_amax_i8_cuda<<<total_groups, 64, 0, stream>>>(
+        src, partial_max.get(), k, groups, total_groups);
+    reduce_convrot_row_amax_i8_cuda<<<rows, 256, 0, stream>>>(
+        partial_max.get(), scales_d, groups, rows);
+    convrot_group_quantize_i8_cuda<<<total_groups, 64, 0, stream>>>(
+        src, dst, scales_d, k, groups, total_groups, dst_stride);
+}
+
+static bool ggml_cuda_op_quantize_i8_convrot(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src,
+        ggml_tensor * dst,
+        int group_size) {
+    const int64_t rows        = ggml_nrows(src);
+    const int64_t rows_padded = GGML_PAD(rows, 4);
+    const int64_t scale_rows  = (rows * (int64_t)sizeof(float) + src->ne[0] - 1) / src->ne[0];
+    if (src->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_I8 ||
+        !ggml_is_contiguous(src) || !ggml_is_contiguous(dst) ||
+        group_size != 256 || src->ne[0] % group_size != 0 ||
+        dst->ne[0] != src->ne[0] || dst->ne[1] != rows_padded + scale_rows) {
+        return false;
+    }
+
+    int8_t * dst_data = (int8_t *)dst->data;
+    ggml_cuda_quantize_i8_convrot(
+        ctx,
+        (const float *)src->data,
+        dst_data,
+        (float *)(dst_data + src->ne[0] * rows_padded),
+        src->ne[0],
+        rows,
+        rows_padded,
+        src->ne[0]);
+    return true;
+}
+
+static void ggml_cuda_mul_mat_i8(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst) {
+    GGML_ASSERT(src0->type == GGML_TYPE_I8);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_I8);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(src0->ne[2] == 1 && src0->ne[3] == 1);
+    GGML_ASSERT(ggml_is_contiguous(src0));
+    GGML_ASSERT(ggml_is_contiguous(src1));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    const int64_t k           = src0->ne[0];
+    const int64_t n           = src0->ne[1];
+    const int64_t rows        = ggml_nrows(dst);
+    const bool prequantized   = src1->type == GGML_TYPE_I8;
+    const int64_t rows_padded = GGML_PAD(rows, 4);
+    const int64_t scale_rows  = (rows * (int64_t)sizeof(float) + k - 1) / k;
+    const int64_t qstride     = k;
+    const int convrot_group_size = ggml_get_op_params_i32(dst, 2);
+    GGML_ASSERT(src1->ne[0] == k);
+    GGML_ASSERT(!prequantized || (src1->op == GGML_OP_QUANTIZE_I8_CONVROT &&
+                                  src1->ne[1] == rows_padded + scale_rows));
+    GGML_ASSERT(convrot_group_size == 0 || convrot_group_size == 256);
+
+    ggml_cuda_pool_alloc<int8_t> qdata(ctx.pool());
+    ggml_cuda_pool_alloc<float> scales(ctx.pool());
+    cudaStream_t stream = ctx.stream();
+    int8_t * qdata_d    = prequantized ? (int8_t *)src1->data : qdata.alloc((size_t)k * rows_padded);
+    float * scales_d    = prequantized
+        ? (float *)((int8_t *)src1->data + k * rows_padded)
+        : scales.alloc(rows);
+
+    if (prequantized) {
+        GGML_ASSERT(src1->op == GGML_OP_QUANTIZE_I8_CONVROT);
+    } else if (convrot_group_size == 0) {
+        if (rows_padded > rows) {
+            CUDA_CHECK(cudaMemsetAsync(qdata_d + k * rows, 0, (size_t)k * (rows_padded - rows), stream));
+        }
+        quantize_rowwise_i8_cuda<<<rows, 256, 0, stream>>>(
+            (const float *)src1->data, qdata_d, scales_d, k, rows);
+    } else {
+        ggml_cuda_quantize_i8_convrot(
+            ctx, (const float *)src1->data, qdata_d, scales_d, k, rows, rows_padded, k);
+    }
+
+    const float * weight_scales = dst->src[2] != nullptr ? (const float *)dst->src[2]->data : nullptr;
+    const float * bias          = dst->src[3] != nullptr ? (const float *)dst->src[3]->data : nullptr;
+    ggml_cuda_pool_alloc<int32_t> accum(ctx.pool(), (size_t)n * rows_padded);
+
+    const int32_t alpha = 1;
+    const int32_t beta  = 0;
+    CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(), stream));
+    CUBLAS_CHECK(cublasGemmEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
+        (int)n, (int)rows_padded, (int)k,
+        &alpha, src0->data, CUDA_R_8I, (int)k,
+                qdata_d, CUDA_R_8I, (int)qstride,
+        &beta,  accum.get(), CUDA_R_32I, (int)n,
+        CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+
+    const dim3 dequant_grid((n + 255) / 256, rows, 1);
+    dequantize_i32_rows_cuda<<<dequant_grid, 256, 0, stream>>>(
+        accum.get(), scales_d, weight_scales, bias,
+        (float *)dst->data, n, rows);
+}
+#endif
+
 static __global__ void k_compute_batched_ptrs(
         const void * src0_as_f16, const void * src1_as_f16, char * dst,
         const void ** ptrs_src, void ** ptrs_dst,
@@ -1828,6 +2247,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         return;
     }
 
+    if (src0->type == GGML_TYPE_I8) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        ggml_cuda_mul_mat_i8(ctx, src0, src1, dst);
+#else
+        GGML_ABORT("INT8 tensorwise matmul is only implemented for CUDA");
+#endif
+        return;
+    }
+
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
     // But if src0 is also a view of another tensor then this cannot be done safely because it may overwrite valid tensor data.
     // Therefore, in such cases use cuBLAS.
@@ -2262,6 +2690,16 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_MUL_MAT_ID:
             ggml_cuda_mul_mat_id(ctx, dst);
             break;
+        case GGML_OP_REGULAR_HADAMARD:
+            GGML_ASSERT(ggml_cuda_op_regular_hadamard(ctx, dst->src[0], dst, ggml_get_op_params_i32(dst, 0)));
+            break;
+        case GGML_OP_QUANTIZE_I8_CONVROT:
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+            GGML_ASSERT(ggml_cuda_op_quantize_i8_convrot(ctx, dst->src[0], dst, ggml_get_op_params_i32(dst, 0)));
+#else
+            GGML_ABORT("INT8 convrot quantization is only implemented for CUDA");
+#endif
+            break;
         case GGML_OP_OUT_PROD:
             ggml_cuda_out_prod(ctx, dst);
             break;
@@ -2588,14 +3026,36 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
     return use_cuda_graph;
 }
 
-static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
-    return cgraph->nodes[0];
+// the key identifies both the split (its first node) and the shapes it was called with.
+// a captured cuda graph hard-codes the shapes, so a caller that alternates shapes - a
+// speculative verify batch, for example - needs a separate instance per shape. with a
+// single key per split, every shape change resets the warmup and no graph is ever used.
+//
+// this stays O(1) on purpose: walking every node undoes the point of a cuda graph, which is
+// to not touch per-node data on the hot path. the first and last node carry the batch
+// dimension, which is what changes when a verify batch changes size. a shape this does not
+// separate just shares an entry and re-captures, exactly as before, so it can only help.
+static uint64_t ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
+    uint64_t key = (uint64_t) (uintptr_t) cgraph->nodes[0];
+
+    auto mix = [&key](uint64_t v) {
+        key = (key ^ v) * 0x100000001b3ull;
+    };
+
+    mix(cgraph->n_nodes);
+
+    for (int d = 0; d < GGML_MAX_DIMS; d++) {
+        mix(cgraph->nodes[0]->ne[d]);
+        mix(cgraph->nodes[cgraph->n_nodes - 1]->ne[d]);
+    }
+
+    return key;
 }
 
 static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
     bool res = false;
 
-    const void * graph_key = ggml_cuda_graph_get_key(cgraph);
+    const uint64_t graph_key = ggml_cuda_graph_get_key(cgraph);
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
 
     if (cgraph->uid != 0 &&
@@ -2634,7 +3094,7 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
     return res;
 }
 
-static void ggml_cuda_graph_update_executable(ggml_backend_cuda_context * cuda_ctx, const void * graph_key) {
+static void ggml_cuda_graph_update_executable(ggml_backend_cuda_context * cuda_ctx, uint64_t graph_key) {
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
 
 #if CUDART_VERSION >= 12000
@@ -4182,7 +4642,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
-static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
+static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, uint64_t graph_key) {
     bool graph_evaluated_or_captured = false;
 
     // flag used to determine whether it is an integrated_gpu
@@ -4401,7 +4861,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 }
 
 #ifdef USE_CUDA_GRAPH
-static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, const void * graph_key) {
+static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, uint64_t graph_key) {
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
 
     if (graph->graph == nullptr) {
@@ -4424,7 +4884,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;
-    const void * graph_key = nullptr;
+    uint64_t graph_key = 0;
 
 #ifdef USE_CUDA_GRAPH
     graph_key = ggml_cuda_graph_get_key(cgraph);
@@ -4527,7 +4987,7 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
     }
 
 #ifdef USE_CUDA_GRAPH
-    const void * graph_key = ggml_cuda_graph_get_key(cgraph);
+    const uint64_t graph_key = ggml_cuda_graph_get_key(cgraph);
     const bool use_cuda_graph = ggml_cuda_graph_set_enabled(cuda_ctx, graph_key);
 #else
     const bool use_cuda_graph = false;
@@ -5128,6 +5588,36 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if (a->nb[0] != ggml_element_size(a) || b->nb[0] != ggml_element_size(b)) {
                     return false; // TODO this could in principle be implemented though currently there is no use case.
                 }
+                if (a->type == GGML_TYPE_I8) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+                    const ggml_tensor * weight_scale = op->src[2];
+                    const ggml_tensor * bias         = op->src[3];
+                    const int convrot_group_size     = ggml_get_op_params_i32(op, 2);
+                    const ggml_tensor * packed_src   = b->src[0];
+                    const int64_t packed_rows = packed_src != nullptr ? GGML_PAD(ggml_nrows(packed_src), 4) : 0;
+                    const int64_t packed_scale_rows = packed_src != nullptr
+                        ? (ggml_nrows(packed_src) * (int64_t)sizeof(float) + a->ne[0] - 1) / a->ne[0]
+                        : 0;
+                    const bool packed_input          = b->type == GGML_TYPE_I8 &&
+                                                       b->op == GGML_OP_QUANTIZE_I8_CONVROT &&
+                                                       packed_src != nullptr && b->ne[0] == a->ne[0] &&
+                                                       b->ne[1] == packed_rows + packed_scale_rows;
+                    return op->op == GGML_OP_MUL_MAT && (b->type == GGML_TYPE_F32 || packed_input) &&
+                           op->type == GGML_TYPE_F32 && a->ne[0] % 4 == 0 && a->ne[1] % 4 == 0 &&
+                           a->ne[2] == 1 && a->ne[3] == 1 &&
+                           ggml_is_contiguous(a) && ggml_is_contiguous(b) && ggml_is_contiguous(op) &&
+                           (weight_scale == nullptr ||
+                            (weight_scale->type == GGML_TYPE_F32 && ggml_is_contiguous(weight_scale) &&
+                             ggml_nelements(weight_scale) == a->ne[1])) &&
+                           (bias == nullptr ||
+                            (bias->type == GGML_TYPE_F32 && ggml_is_contiguous(bias) &&
+                             ggml_nelements(bias) == a->ne[1])) &&
+                           (convrot_group_size == 0 || (convrot_group_size == 256 && a->ne[0] % 256 == 0)) &&
+                           turing_mma_available(ggml_cuda_info().devices[dev_ctx->device].cc);
+#else
+                    return false;
+#endif
+                }
                 if (b->type == GGML_TYPE_F16 && a->type != GGML_TYPE_F16) {
                     return false;
                 }
@@ -5516,6 +6006,34 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return true;
         case GGML_OP_LIGHTNING_INDEXER:
             return ggml_cuda_lightning_indexer_supported(dev_ctx->device, op);
+        case GGML_OP_REGULAR_HADAMARD:
+            {
+                const ggml_tensor * src = op->src[0];
+                const int group_size    = ggml_get_op_params_i32(op, 0);
+                return src != nullptr &&
+                       src->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                       ggml_is_contiguous(src) && ggml_is_contiguous(op) &&
+                       group_size > 0 && src->ne[0] % group_size == 0 &&
+                       (group_size == 4 || group_size == 16 || group_size == 64 || group_size == 256);
+            }
+        case GGML_OP_QUANTIZE_I8_CONVROT:
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+            {
+                const ggml_tensor * src = op->src[0];
+                const int group_size    = ggml_get_op_params_i32(op, 0);
+                const int64_t rows      = src != nullptr ? ggml_nrows(src) : 0;
+                const int64_t rows_padded = GGML_PAD(rows, 4);
+                const int64_t scale_rows = src != nullptr
+                    ? (rows * (int64_t)sizeof(float) + src->ne[0] - 1) / src->ne[0]
+                    : 0;
+                return src != nullptr && src->type == GGML_TYPE_F32 && op->type == GGML_TYPE_I8 &&
+                       ggml_is_contiguous(src) && ggml_is_contiguous(op) &&
+                       group_size == 256 && src->ne[0] % group_size == 0 &&
+                       op->ne[0] == src->ne[0] && op->ne[1] == rows_padded + scale_rows;
+            }
+#else
+            return false;
+#endif
 
         default:
             return false;
