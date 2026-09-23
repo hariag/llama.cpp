@@ -452,6 +452,10 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
                 op->type != GGML_TYPE_IQ1_M; // missing type_traits.from_float
         case GGML_OP_MUL_MAT:
             if (src0->type == GGML_TYPE_I8) {
+                return false;
+            }
+
+            if (src0->type == GGML_TYPE_I8) {
                 const ggml_tensor * weight_scale = op->src[2];
                 const ggml_tensor * bias         = op->src[3];
                 const int convrot_group_size     = ggml_get_op_params_i32(op, 2);
