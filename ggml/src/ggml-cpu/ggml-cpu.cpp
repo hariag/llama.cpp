@@ -483,6 +483,8 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
                    ggml_is_contiguous(src0) && ggml_is_contiguous(op) &&
                    group_size > 0 && group_size <= 256 && src0->ne[0] % group_size == 0;
         }
+        case GGML_OP_SAGE_ATTN:
+            return false;
         case GGML_OP_REGULAR_HADAMARD: {
             int group_size = ggml_get_op_params_i32(op, 0);
             if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32 ||
