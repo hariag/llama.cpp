@@ -43,6 +43,7 @@ GGML_API void quantize_row_iq3_s_ref  (const float * GGML_RESTRICT x, block_iq3_
 GGML_API void quantize_row_iq2_s_ref  (const float * GGML_RESTRICT x, block_iq2_s   * GGML_RESTRICT y, int64_t k);
 
 // Dequantization
+GGML_API void dequantize_row_i8(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API float ggml_fp8_e4m3_to_fp32(uint8_t x);
 GGML_API float ggml_fp8_e5m2_to_fp32(uint8_t x);
 GGML_API void dequantize_row_f8_e4m3(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);

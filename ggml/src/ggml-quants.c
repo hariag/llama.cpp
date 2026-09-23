@@ -439,6 +439,13 @@ float ggml_fp8_e5m2_to_fp32(uint8_t x) {
     return GGML_FP16_TO_FP32(value);
 }
 
+
+void dequantize_row_i8(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    for (int64_t i = 0; i < k; ++i) {
+        y[i] = (float)((int8_t) x[i]);
+    }
+}
+
 void dequantize_row_f8_e4m3(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     for (int64_t i = 0; i < k; ++i) {
         y[i] = ggml_fp8_e4m3_to_fp32(x[i]);
