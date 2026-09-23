@@ -416,6 +416,41 @@ void quantize_row_nvfp4_ref(const float * GGML_RESTRICT x, block_nvfp4 * GGML_RE
     }
 }
 
+float ggml_fp8_e4m3_to_fp32(uint8_t x) {
+    const uint32_t sign     = x >> 7;
+    const uint32_t exponent = (x >> 3) & 0x0f;
+    const uint32_t mantissa = x & 0x07;
+
+    if (exponent == 0x0f && mantissa == 0x07) {
+        return sign ? -NAN : NAN;
+    }
+
+    float value;
+    if (exponent == 0) {
+        value = ldexpf((float) mantissa, -9);
+    } else {
+        value = ldexpf(1.0f + (float) mantissa / 8.0f, (int) exponent - 7);
+    }
+    return sign ? -value : value;
+}
+
+float ggml_fp8_e5m2_to_fp32(uint8_t x) {
+    const ggml_fp16_t value = (ggml_fp16_t) x << 8;
+    return GGML_FP16_TO_FP32(value);
+}
+
+void dequantize_row_f8_e4m3(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    for (int64_t i = 0; i < k; ++i) {
+        y[i] = ggml_fp8_e4m3_to_fp32(x[i]);
+    }
+}
+
+void dequantize_row_f8_e5m2(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    for (int64_t i = 0; i < k; ++i) {
+        y[i] = ggml_fp8_e5m2_to_fp32(x[i]);
+    }
+}
+
 void dequantize_row_q1_0(const block_q1_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK1_0;
 
