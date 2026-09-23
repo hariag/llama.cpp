@@ -901,6 +901,7 @@ static void string_replace_all(std::string & s, const std::string & search, cons
     builder.append(s, last_pos, std::string::npos);
     s = std::move(builder);
 }
+#endif
 
 // split string by a `std::string delim` instead of `char delim`
 static std::vector<std::string> string_split_str(std::string s, const std::string & delimiter) {
@@ -917,6 +918,7 @@ static std::vector<std::string> string_split_str(std::string s, const std::strin
 }
 
 // remove when moving to c++20
+#ifndef DIRECTORY_SEPARATOR
 inline bool string_starts_with(std::string_view str, std::string_view prefix) {
     return str.size() >= prefix.size() &&
            str.compare(0, prefix.size(), prefix) == 0;

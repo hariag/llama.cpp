@@ -86,6 +86,27 @@ llm_chat_template llm_chat_template_from_str(const std::string & name) {
     return LLM_CHAT_TEMPLATES.at(name);
 }
 
+const char * llama_chat_template_alias(const char * tmpl) {
+    static thread_local std::string alias;
+    switch (llm_chat_detect_template(tmpl == nullptr ? std::string() : std::string(tmpl))) {
+        case LLM_CHAT_TEMPLATE_CHATML:      alias = "chatml"; break;
+        case LLM_CHAT_TEMPLATE_CHATGLM_4:   alias = "chatglm4"; break;
+        case LLM_CHAT_TEMPLATE_MISTRAL_V1:
+        case LLM_CHAT_TEMPLATE_MISTRAL_V3:
+        case LLM_CHAT_TEMPLATE_MISTRAL_V3_TEKKEN:
+        case LLM_CHAT_TEMPLATE_MISTRAL_V7:
+        case LLM_CHAT_TEMPLATE_MISTRAL_V7_TEKKEN: alias = "mistral-v3"; break;
+        case LLM_CHAT_TEMPLATE_DEEPSEEK:
+        case LLM_CHAT_TEMPLATE_DEEPSEEK_2:
+        case LLM_CHAT_TEMPLATE_DEEPSEEK_3: alias = "deepseek"; break;
+        case LLM_CHAT_TEMPLATE_COMMAND_R:   alias = "command-r"; break;
+        case LLM_CHAT_TEMPLATE_GEMMA:       alias = "gemma"; break;
+        case LLM_CHAT_TEMPLATE_LLAMA_3:     alias = "llama3"; break;
+        default:                            alias = "unknown"; break;
+    }
+    return alias.c_str();
+}
+
 llm_chat_template llm_chat_detect_template(const std::string & tmpl) {
     try {
         return llm_chat_template_from_str(tmpl);

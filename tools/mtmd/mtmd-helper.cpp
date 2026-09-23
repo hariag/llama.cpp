@@ -363,6 +363,11 @@ static bool decode_audio_from_buf(const unsigned char * buf_in, size_t len, int 
 
 } // namespace audio_helpers
 
+bool mtmd_helper_decode_audio_from_buf(const unsigned char * buf_in, size_t len, int target_sampler_rate,
+                                       std::vector<float> & pcmf32_mono) {
+    return audio_helpers::decode_audio_from_buf(buf_in, len, target_sampler_rate, pcmf32_mono);
+}
+
 static bool is_webp_file(const unsigned char * buf, size_t len) {
     // WEBP ref: https://developers.google.com/speed/webp/docs/riff_container
     return len >= 12 && memcmp(buf, "RIFF", 4) == 0 && memcmp(buf + 8, "WEBP", 4) == 0;
