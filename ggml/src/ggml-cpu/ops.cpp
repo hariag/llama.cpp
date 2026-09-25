@@ -5673,7 +5673,9 @@ static void ggml_compute_forward_soft_max_f32(
                 }
 
                 ggml_float sum = ggml_vec_soft_max_f32(ne00, dp, wp, max);
-                assert(sum > 0.0);
+                if (isnan(sum) || sum == 0.0) {
+                    sum = -INFINITY;
+                }
 
                 if (sk) {
                     sum += (ggml_float) expf(sk[i02] - max);

@@ -200,7 +200,10 @@ struct ggml_backend_registry {
 #endif
         backends.push_back({ reg, std::move(handle) });
         for (size_t i = 0; i < ggml_backend_reg_dev_count(reg); i++) {
-            register_device(ggml_backend_reg_dev_get(reg, i));
+            ggml_backend_dev_t dev = ggml_backend_reg_dev_get(reg, i);
+            if (dev != nullptr) {
+                register_device(dev);
+            }
         }
     }
 

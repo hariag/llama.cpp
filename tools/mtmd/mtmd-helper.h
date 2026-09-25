@@ -254,6 +254,12 @@ MTMD_API int32_t mtmd_helper_gen_audio_get_output(
 #ifdef __cplusplus
 #include <set>
 #include <memory>
+#include <vector>
+
+MTMD_API bool mtmd_helper_decode_audio_from_buf(const unsigned char * buf_in,
+                                                size_t len,
+                                                int target_sampler_rate,
+                                                std::vector<float> & pcmf32_mono);
 
 namespace mtmd_helper {
 

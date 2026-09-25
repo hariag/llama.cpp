@@ -1893,6 +1893,12 @@ std::string llama_model::arch_name() const {
     return llm_arch_name(arch);
 }
 
+const char * llama_model_arch_name(const struct llama_model * model) {
+    static thread_local std::string name;
+    name = model == nullptr ? std::string() : model->arch_name();
+    return name.c_str();
+}
+
 std::string llama_model::type_name() const {
     return llm_type_name(type);
 }

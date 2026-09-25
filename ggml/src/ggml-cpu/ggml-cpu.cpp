@@ -481,6 +481,26 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
                 return src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16;
             }
             return src1->type == GGML_TYPE_F32 || src1->type == ggml_get_type_traits_cpu(src0->type)->vec_dot_type;
+        case GGML_OP_QUANTIZE_I8_CONVROT: {
+            const int group_size = ggml_get_op_params_i32(op, 0);
+            return src0->type == GGML_TYPE_F32 && op->type == GGML_TYPE_I8 &&
+                   ggml_is_contiguous(src0) && ggml_is_contiguous(op) &&
+                   group_size > 0 && group_size <= 256 && src0->ne[0] % group_size == 0;
+        }
+        case GGML_OP_SAGE_ATTN:
+            return false;
+        case GGML_OP_REGULAR_HADAMARD: {
+            int group_size = ggml_get_op_params_i32(op, 0);
+            if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32 ||
+                !ggml_is_contiguous(src0) || !ggml_is_contiguous(op) ||
+                group_size <= 0 || src0->ne[0] % group_size != 0) {
+                return false;
+            }
+            while (group_size > 1 && group_size % 4 == 0) {
+                group_size /= 4;
+            }
+            return group_size == 1;
+        }
         case GGML_OP_SOFT_MAX_BACK: {
             if (op->src[0]->type != GGML_TYPE_F32 || op->src[1]->type != GGML_TYPE_F32) {
                 return false;

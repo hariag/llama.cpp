@@ -4340,6 +4340,10 @@ llama_token llama_vocab_pad(const struct llama_vocab * vocab) {
     return vocab->token_pad();
 }
 
+llama_token llama_vocab_unk(const struct llama_vocab * vocab) {
+    return vocab->token_unk();
+}
+
 bool llama_vocab_get_add_bos(const struct llama_vocab * vocab) {
     return vocab->get_add_bos();
 }

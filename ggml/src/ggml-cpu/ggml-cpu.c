@@ -2317,6 +2317,8 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 ggml_compute_forward_quantize_i8_convrot(params, tensor);
             }
             break;
+        case GGML_OP_SAGE_ATTN:
+            GGML_ABORT("SageAttention is not supported by the CPU backend");
         case GGML_OP_NONE:
             {
                 // nop

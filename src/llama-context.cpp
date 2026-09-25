@@ -806,6 +806,10 @@ const llama_cparams & llama_context::get_cparams() const {
     return cparams;
 }
 
+bool llama_context::causal_attn() const {
+    return cparams.causal_attn;
+}
+
 ggml_backend_sched_t llama_context::get_sched() const {
     return sched.get();
 }
@@ -3985,6 +3989,10 @@ llama_memory_t llama_get_memory(const struct llama_context * ctx) {
     }
 
     return ctx->get_memory();
+}
+
+bool llama_causal_attn(const struct llama_context * ctx) {
+    return ctx != nullptr && ctx->causal_attn();
 }
 
 float * llama_get_embeddings_nextn(llama_context * ctx) {
