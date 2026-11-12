@@ -175,21 +175,11 @@ if(GGML_SYCL_DNN)
             "-DDNNL_DIR=<dnnl-prefix>/lib/cmake/dnnl (or export DNNLROOT). "
             "To build without oneDNN on purpose, pass -DGGML_SYCL_DNN=OFF.")
     endif()
-    if(NOT DEFINED DNNL_GPU_VENDOR)
-        # A DNNL package that does not declare DNNL_GPU_VENDOR has no GPU/SYCL
-        # support compiled in (e.g. Debian/Ubuntu's CPU-only libdnnl-dev).
-        # The old code defaulted the vendor to INTEL here, which fake-passed
-        # the target check below and silently linked a CPU-only library into
-        # the SYCL backend.
-        message(FATAL_ERROR
-            "Found oneDNN at ${DNNL_DIR} but it does not declare "
-            "DNNL_GPU_VENDOR - it is a CPU-only build (Debian/Ubuntu "
-            "libdnnl-dev?). Install the oneAPI-bundled GPU build "
-            "(intel-oneapi-dnnl-devel) instead.")
-    endif()
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/validate-dnnl.cmake)
+    ggml_sycl_validate_dnnl("${GGML_SYCL_TARGET}")
 
     # Verify oneDNN was compiled for the same target as llama
-    if("${GGML_SYCL_TARGET}" STREQUAL "${DNNL_GPU_VENDOR}")
+    if(NOT DEFINED DNNL_GPU_VENDOR OR "${GGML_SYCL_TARGET}" STREQUAL "${DNNL_GPU_VENDOR}")
         target_link_libraries(ggml-sycl PRIVATE DNNL::dnnl)
         set(GGML_SYCL_DNNL 1)
         get_target_property(CONFIGS DNNL::dnnl IMPORTED_CONFIGURATIONS)
