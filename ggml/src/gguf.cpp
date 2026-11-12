@@ -3,6 +3,7 @@
 #include "ggml-impl.h"
 #include "gguf.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
@@ -366,6 +367,11 @@ struct gguf_reader {
 
     uint64_t tell() const {
         return data_offset;
+    }
+
+    // bytes left between the current position and the end of the input
+    uint64_t remain() const {
+        return nbytes_remain;
     }
 
     // position in the file where the GGUF data starts, alignment is relative to it, not to the file
@@ -786,6 +792,74 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
 
     // store the current file offset - this is where the data section starts
     ctx->offset = gr.tell();
+
+    // Old Unsloth files use on-disk type 43 for MXFP8, while this fork
+    // uses it for F8_E4M3. Resolve only when the stored tensor span proves
+    // the representation. Never infer an ambiguous tensor from another one:
+    // mixed-format GGUF files can contain both encodings.
+    {
+        enum { FIT_NONE, FIT_F8, FIT_MX, FIT_BOTH };
+        const uint64_t data_end = gr.remain(); // the reader sits at the start of the data section
+        std::vector<uint64_t> offs; // data offsets in data order: the header order is not trusted here
+        offs.reserve(ctx->info.size());
+        for (const gguf_tensor_info & ti : ctx->info) {
+            offs.push_back(ti.offset);
+        }
+        std::sort(offs.begin(), offs.end());
+        std::vector<int> fit(ctx->info.size(), FIT_NONE);
+        for (size_t i = 0; i < ctx->info.size(); ++i) {
+            const gguf_tensor_info & ti = ctx->info[i];
+            if (ti.t.type != GGML_TYPE_F8_E4M3) {
+                continue;
+            }
+            if (ti.t.ne[0] % ggml_blck_size(GGML_TYPE_MXFP8) != 0) {
+                fit[i] = FIT_F8;
+                continue;
+            }
+            const int64_t  n_rows = ggml_nrows(&ti.t);
+            const uint64_t f8     = ggml_row_size(GGML_TYPE_F8_E4M3, ti.t.ne[0]) * n_rows;
+            const uint64_t mx     = ggml_row_size(GGML_TYPE_MXFP8,   ti.t.ne[0]) * n_rows;
+            const uint64_t pad_f8 = GGML_PAD(f8, ctx->alignment);
+            const uint64_t pad_mx = GGML_PAD(mx, ctx->alignment);
+            const auto next = std::upper_bound(offs.begin(), offs.end(), ti.offset);
+            bool fits_mx;
+            bool fits_f8;
+            if (next != offs.end()) {
+                const uint64_t span = *next - ti.offset;
+                fits_mx = span == pad_mx;
+                fits_f8 = span == pad_f8;
+            } else {
+                const uint64_t span = data_end > ti.offset ? data_end - ti.offset : 0;
+                fits_mx = span >= mx && span <= pad_mx;
+                fits_f8 = span >= f8 && span <= pad_f8;
+            }
+            fit[i] = fits_mx && fits_f8 ? FIT_BOTH : fits_mx ? FIT_MX : fits_f8 ? FIT_F8 : FIT_NONE;
+        }
+        for (size_t i = 0; i < ctx->info.size(); ++i) {
+            gguf_tensor_info & ti = ctx->info[i];
+            if (fit[i] == FIT_BOTH) {
+                GGML_LOG_ERROR("%s: tensor '%s' uses ambiguous type 43; its span fits both MXFP8 and F8_E4M3 at alignment %zu\n",
+                               __func__, ti.t.name, ctx->alignment);
+                gguf_free(ctx);
+                return nullptr;
+            }
+            if (fit[i] == FIT_NONE && ti.t.type == GGML_TYPE_F8_E4M3) {
+                GGML_LOG_ERROR("%s: tensor '%s' has an invalid type 43 span; it fits neither MXFP8 nor F8_E4M3\n",
+                               __func__, ti.t.name);
+                gguf_free(ctx);
+                return nullptr;
+            }
+            if (fit[i] != FIT_MX) {
+                continue;
+            }
+            ti.t.type  = GGML_TYPE_MXFP8;
+            ti.t.nb[0] = ggml_type_size(GGML_TYPE_MXFP8);
+            ti.t.nb[1] = ti.t.nb[0]*(ti.t.ne[0]/ggml_blck_size(GGML_TYPE_MXFP8));
+            for (int j = 2; j < GGML_MAX_DIMS; ++j) {
+                ti.t.nb[j] = ti.t.nb[j - 1]*ti.t.ne[j - 1];
+            }
+        }
+    }
 
     // compute the total size of the data section, taking into account the alignment
     {

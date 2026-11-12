@@ -1210,6 +1210,7 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
 
 // declared in llama-model.h, which this file does not include
 const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_tensor_map(const llama_model * model);
+ggml_tensor * llama_internal_get_output_tensor(const llama_model * model);
 
 struct ggml_tensor * llama_model_loader::borrow_shared_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne) {
     // only the tensors a draft head is allowed to leave out, checked first so no other
@@ -1229,6 +1230,11 @@ struct ggml_tensor * llama_model_loader::borrow_shared_tensor(const LLM_TN_IMPL 
 
     // a file that declares the flag and still ships the tensor keeps its own copy
     const std::string name = tn.str();
+    // Only the weights are shareable here. In particular, output.scale must
+    // never be mistaken for output.weight merely because both use OUTPUT.
+    if (name.size() < 7 || name.compare(name.size() - 7, 7, ".weight") != 0) {
+        return nullptr;
+    }
     if (get_weight(name.c_str()) != nullptr) {
         return nullptr;
     }
@@ -1238,11 +1244,15 @@ struct ggml_tensor * llama_model_loader::borrow_shared_tensor(const LLM_TN_IMPL 
                     "load it as a draft of its target model, not on its own", __func__, name.c_str()));
     }
 
-    ggml_tensor * src = nullptr;
-    for (const auto & [n, t] : llama_internal_get_tensor_map(model_shared)) {
-        if (n == name) {
-            src = t;
-            break;
+    // An output head may be tied to token_embd in the target, in which case
+    // its allocated tensor is named token_embd.weight rather than output.weight.
+    ggml_tensor * src = tn.tensor == LLM_TENSOR_OUTPUT ? llama_internal_get_output_tensor(model_shared) : nullptr;
+    if (!src) {
+        for (const auto & [n, t] : llama_internal_get_tensor_map(model_shared)) {
+            if (n == name) {
+                src = t;
+                break;
+            }
         }
     }
     if (src == nullptr) {
@@ -1267,6 +1277,10 @@ struct ggml_tensor * llama_model_loader::borrow_shared_tensor(const LLM_TN_IMPL 
     }
 
     LLAMA_LOG_INFO("%s: tensor %s taken from the target model\n", __func__, name.c_str());
+    borrowed_shared_tensor = true;
+    if (tn.tensor == LLM_TENSOR_OUTPUT) {
+        borrowed_shared_output = true;
+    }
 
     // not counted in n_created or size_data: the tensor is not in this file and is neither
     // allocated nor freed here
@@ -1424,6 +1438,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             if (!buft) {
                 throw std::runtime_error(format("failed to find a compatible buffer type for tensor %s", tn.str().c_str()));
             }
+        }
+
+        // the deepseek41 Engram table (~200 GB) is a CPU get_rows gather table: never put it in device memory
+        if (get_arch() == LLM_ARCH_DEEPSEEK41 && tn.tensor == LLM_TENSOR_PER_LAYER_TOKEN_EMBD && !ggml_backend_buft_is_host(buft)) {
+            LLAMA_LOG_WARN("llama_model_loader: %s (%zu MiB %s) must stay in host memory; ignoring placement on %s, using %s\n",
+                    tn.str().c_str(), ggml_nbytes(t_meta) / 1024 / 1024, ggml_type_name(t_meta->type),
+                    ggml_backend_buft_name(buft), ggml_backend_buft_name(ggml_backend_cpu_buffer_type()));
+            buft = ggml_backend_cpu_buffer_type();
         }
 
         // avoid using a host buffer when using mmap

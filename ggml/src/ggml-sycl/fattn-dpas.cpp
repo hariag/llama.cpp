@@ -21,9 +21,9 @@ static constexpr int   FA_DPAS_MAX_G = 32;       // query heads per KV head
 static constexpr float FA_DPAS_MINF  = -1.0e30f; // finite start value of the running max
 
 static bool fattn_dpas_support_arch(gpu_arch arch) {
-    return arch == gpu_arch::intel_gpu_bmg_g21 || arch == gpu_arch::intel_gpu_bmg_g31 ||
-           arch == gpu_arch::intel_gpu_lnl_m   || arch == gpu_arch::intel_gpu_ptl_h   ||
-           arch == gpu_arch::intel_gpu_ptl_u   || arch == gpu_arch::intel_gpu_wcl;
+    return arch == gpu_arch::intel_gpu_bmg_g21 || ggml_sycl_is_bmg_g31(arch) ||
+           arch == gpu_arch::intel_gpu_lnl_m   || ggml_sycl_is_ptl_h(arch)   ||
+           ggml_sycl_is_ptl_u(arch)   || ggml_sycl_is_wcl(arch);
 }
 
 // head sizes with a compiled kernel (multiples of the 32-dim q4_0 / q8_0 block)

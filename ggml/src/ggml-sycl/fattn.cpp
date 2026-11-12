@@ -275,7 +275,7 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
             if (Q->ne[1] <= 2) {
                 // TILE is faster for quantized KV decode on Xe2 (BMG); keep VEC on untested archs
                 const gpu_arch arch = ggml_sycl_info().devices[device].hw_info.arch;
-                if (arch == gpu_arch::intel_gpu_bmg_g21 || arch == gpu_arch::intel_gpu_bmg_g31) {
+                if (arch == gpu_arch::intel_gpu_bmg_g21 || ggml_sycl_is_bmg_g31(arch)) {
                     return BEST_FATTN_KERNEL_TILE;
                 }
                 return BEST_FATTN_KERNEL_VEC;

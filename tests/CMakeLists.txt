@@ -139,6 +139,11 @@ endfunction()
 # build test-tokenizer-0 target once and add many tests
 llama_build(test-tokenizer-0.cpp)
 
+# The optional SYCL architecture helpers are independent of the SYCL SDK.
+add_executable(test-sycl-arch-compat test-sycl-arch-compat.cpp)
+target_compile_features(test-sycl-arch-compat PRIVATE cxx_std_17)
+llama_test(test-sycl-arch-compat LABEL behavior)
+
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-bert-bge        LABEL behavior  ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-bert-bge.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-command-r       LABEL behavior  ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-command-r.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-deepseek-coder  LABEL behavior  ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-deepseek-coder.gguf)
@@ -192,6 +197,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build_and_test(test-batch-alloc.cpp  LABEL behavior  LINK llama)
     llama_build_and_test(test-kv-cache.cpp LABEL behavior)
     target_include_directories(test-kv-cache PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    llama_build_and_test(test-deepseek41-chat.cpp LABEL behavior WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     llama_build_and_test(test-chat.cpp  LABEL behavior  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     target_include_directories(test-chat PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
     target_link_libraries(test-chat PRIVATE server-context)
@@ -230,6 +236,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
 endif()
 
 llama_build(test-llama-archs.cpp)
+llama_test(test-llama-archs NAME test-qwen4exp-shared-mtp LABEL "main behavior" ARGS --qwen4exp-mtp -s 17)
 if (GGML_CPU AND (NOT WIN32 OR NOT BUILD_SHARED_LIBS))
     llama_build(test-fp8.cpp)
     set(FP8_MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-models-fp8")
@@ -400,6 +407,10 @@ endif()
 llama_build_and_test(test-mtmd-c-api.c  LABEL behavior  LINK mtmd)
 
 llama_build_and_test(test-mtmd-impl.cpp  LABEL behavior  LINK mtmd)
+
+# Requires local Gemma 4 model and projector paths; run manually.
+llama_build(test-gemma4-stream.cpp LINK mtmd)
+llama_build(test-gemma4-live-inference.cpp LINK mtmd)
 
 # GGUF model data fetcher library for tests that need real model metadata
 # Only compile when cpp-httplib has SSL support (CPPHTTPLIB_OPENSSL_SUPPORT)

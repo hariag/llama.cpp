@@ -131,6 +131,10 @@ protected:
 
 using llm_graph_input_ptr = std::unique_ptr<llm_graph_input_i>;
 
+// dst[i] = row ids[i] of host table tab as F32, same conversion as CPU GET_ROWS (bitwise equal)
+bool llm_graph_host_rows_supported(const ggml_tensor * tab);
+void llm_graph_host_get_rows(const ggml_tensor * tab, const int32_t * ids, int64_t n_ids, float * dst);
+
 class llm_graph_input_embd : public llm_graph_input_i {
 public:
     llm_graph_input_embd(int64_t n_embd) : n_embd(n_embd) {}
@@ -147,6 +151,10 @@ public:
     ggml_tensor * mixed_embd   = nullptr; // F32 [n_embd, n_batch], mixed path: embd rows, token rows are overwritten
     ggml_tensor * scale_rows   = nullptr; // F32 [1, n_batch], per-row scale: scale_tok for token rows, 1 for embd rows
     ggml_tensor * embd_rows    = nullptr; // I32 [n_batch], embd row path: rows of ctx_other's layer input device buffer
+
+    // host-gather mode: token rows are dequantized into `embd` in set_input (no CPU split before the first device)
+    const ggml_tensor * tok_host = nullptr;
+    std::vector<float>  tok_rows;
 
     float scale_tok = 1.0f;
 
@@ -1264,10 +1272,10 @@ struct llm_graph_context {
     //
 
     // tok_scale: applied to token rows only
-    ggml_tensor * build_inp_embd(ggml_tensor * tok_embd, float tok_scale = 1.0f) const;
+    // host_gather applies only when token weights are safely accessible on host.
+    ggml_tensor * build_inp_embd(ggml_tensor * tok_embd, float tok_scale = 1.0f, bool host_gather = false) const;
 
-    // the state input of an MTP graph: rows of the h_nextn device buffer of ctx_state_src (see llama_set_embd_state_src()),
-    // or uploaded from ubatch.embd_state
+    // Input state for the MTP graph.
     ggml_tensor * build_inp_embd_state(llm_graph_input_embd_h * inp, int64_t n_embd_state) const;
 
     ggml_tensor * build_inp_pos() const;

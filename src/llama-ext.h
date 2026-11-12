@@ -196,6 +196,9 @@ LLAMA_API bool llama_set_embd_state_src(struct llama_context * ctx, struct llama
 // The state of entry idx is row `row` of the h_nextn device buffer of the context set with llama_set_embd_state_src().
 // All entries of a batch have a state row, or none.
 LLAMA_API bool llama_batch_ext_set_embd_state_row(struct llama_batch_ext * batch, int32_t idx, int32_t row);
+// Run a pending scheduler reserve now instead of on the next decode, e.g. so that the memory breakdown of an
+// allocation-free context reflects flags that change the graph shape
+LLAMA_API void llama_sched_reserve(struct llama_context * ctx);
 
 //
 // model/context data extraction

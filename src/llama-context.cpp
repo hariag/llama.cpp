@@ -468,11 +468,18 @@ llama_context::llama_context(
             backends.emplace_back(backend);
         }
 
-        // tensors of ctx_other (e.g. a shared KV cache) can be on devices that this model does not use
-        if (cparams.ctx_other) {
-            for (const auto & dev_other : llama_get_model(cparams.ctx_other)->devices) {
-                const bool found = std::any_of(model.devices.begin(), model.devices.end(),
-                        [&](const llama_device & dev) { return dev.dev == dev_other.dev; });
+        // Shared KV and borrowed draft weights can live on target devices not
+        // otherwise used by this model. Adding backends must not set ctx_other:
+        // MTP heads still own their independent memory.
+        const auto add_shared_model_backends = [&](const llama_model * other) {
+            if (!other) {
+                return;
+            }
+            for (const auto & dev_other : other->devices) {
+                const bool found = std::any_of(backends.begin(), backends.end(),
+                        [&](const ggml_backend_ptr & backend) {
+                            return ggml_backend_get_device(backend.get()) == dev_other.dev;
+                        });
                 if (found) {
                     continue;
                 }
@@ -482,7 +489,9 @@ llama_context::llama_context(
                 }
                 backends.emplace_back(backend);
             }
-        }
+        };
+        add_shared_model_backends(cparams.ctx_other ? llama_get_model(cparams.ctx_other) : nullptr);
+        add_shared_model_backends(model.borrowed_model);
 
         // add ACCEL backends (such as BLAS)
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
@@ -5236,4 +5245,8 @@ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * c
 
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
+}
+
+void llama_sched_reserve(struct llama_context * ctx) {
+    ctx->sched_reserve();
 }

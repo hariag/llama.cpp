@@ -19,7 +19,7 @@
 // layout: faster on Xe2 (BMG), so untested archs keep the per-column kernel
 inline bool ggml_sycl_q5_k_mmvq_reuse(int device) {
     const gpu_arch arch = ggml_sycl_info().devices[device].hw_info.arch;
-    return arch == gpu_arch::intel_gpu_bmg_g21 || arch == gpu_arch::intel_gpu_bmg_g31;
+    return arch == gpu_arch::intel_gpu_bmg_g21 || ggml_sycl_is_bmg_g31(arch);
 }
 
 void ggml_sycl_op_mul_mat_vec_q(

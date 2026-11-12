@@ -434,7 +434,10 @@ extern "C" {
         GGML_TYPE_Q2_0    = 42,
         GGML_TYPE_F8_E4M3 = 43,
         GGML_TYPE_F8_E5M2 = 44,
-        GGML_TYPE_COUNT   = 45,
+        // Legacy Unsloth GGUF files encode MXFP8 as 43; the reader safely
+        // resolves the collision by tensor span before using this internal ID.
+        GGML_TYPE_MXFP8   = 63,
+        GGML_TYPE_COUNT   = 64,
     };
 
     // [TAG_GGML_PREC]

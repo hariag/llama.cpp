@@ -617,7 +617,10 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llm_graph_params & params) :
     ggml_build_forward_expand(gf, inp_hyb->get_recr()->s_copy);
 
     llm_graph_input_kpool * inp_kpool = nullptr;
-    if (mctx_hyb->get_idx() && hparams.indexer_kpool > 0) {
+    // Older standalone MTP heads can have a dense last block (ratio 0).
+    // Its indexer has no cache storage, so constructing a k-pool input for
+    // this block would leave that input unallocated at decode time.
+    if (mctx_hyb->get_idx() && hparams.indexer_kpool > 0 && hparams.dsv4_compress_ratios[il] > 0) {
         GGML_ASSERT(mctx_hyb->get_idx()->get_n_kv() == mctx_hyb->get_attn()->get_n_kv() &&
                 "the indexer cache must track the attention cache cell for cell");
         inp_kpool = build_inp_kpool(mctx_hyb);

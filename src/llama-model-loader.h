@@ -117,6 +117,10 @@ struct llama_model_loader {
 
     // target model a draft head borrows the shared tensors from, see borrow_shared_tensor()
     const struct llama_model * model_shared = nullptr;
+    // Record actual borrowed tensors, not just the metadata flag: a draft may
+    // declare sharing but still contain some or all of its own weights.
+    bool borrowed_shared_tensor = false;
+    bool borrowed_shared_output = false;
 
     // cached nextn_shared_target_tensors, -1 until first read
     int shared_target_tensors = -1;

@@ -1281,7 +1281,7 @@ static size_t ggml_backend_sycl_buffer_type_get_alignment(ggml_backend_buffer_ty
 }
 
 static bool is_bmg_g31_arch(int device) {
-    return ggml_sycl_info().devices[device].hw_info.arch == gpu_arch::intel_gpu_bmg_g31;
+    return ggml_sycl_is_bmg_g31(ggml_sycl_info().devices[device].hw_info.arch);
 }
 
 static size_t ggml_backend_sycl_buffer_type_get_max_size(ggml_backend_buffer_type_t buft) {

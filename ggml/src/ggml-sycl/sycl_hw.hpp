@@ -8,6 +8,8 @@
 
 #include <sycl/sycl.hpp>
 
+#include "sycl-arch-compat.hpp"
+
 namespace syclex = sycl::ext::oneapi::experimental;
 using gpu_arch = sycl::ext::oneapi::experimental::architecture;
 

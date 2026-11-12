@@ -181,6 +181,7 @@ struct common_speculative_impl {
 
     uint32_t n_seq;
     int32_t n_max; // maximum draft length after implementation-specific limits
+    bool draft_error = false;
 
     size_t n_call_begin  = 0; // number of times this implementation was called for refresh.
     size_t n_call_draft  = 0; // number of times this implementation was called for generation.
@@ -388,6 +389,7 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
         int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
         if (ret != 0) {
             SPC_ERR("llama_process returned %d\n", ret);
+            draft_error = true;
             return;
         }
 
@@ -456,6 +458,7 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
             ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
             if (ret != 0) {
                 SPC_ERR("llama_process[%d] returned %d\n", i, ret);
+                draft_error = true;
                 break;
             }
 
@@ -836,6 +839,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
         if (ret != 0) {
             SPC_ERR("llama_process returned %d\n", ret);
+            draft_error = true;
             return;
         }
 
@@ -901,6 +905,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
             ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
             if (ret != 0) {
                 SPC_ERR("llama_process[%d] returned %d\n", i, ret);
+                draft_error = true;
                 break;
             }
 
@@ -1366,6 +1371,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
         if (ret != 0) {
             LOG_WRN("%s: llama_process returned %d\n", __func__, ret);
+            draft_error = true;
             return;
         }
 
@@ -1910,6 +1916,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
             if (ret != 0) {
                 SPC_ERR("llama_process[%d] returned %d\n", i, ret);
+                draft_error = true;
                 break;
             }
 
@@ -3100,9 +3107,9 @@ bool common_speculative_process(common_speculative * spec, const common_batch & 
     return result;
 }
 
-void common_speculative_draft(common_speculative * spec) {
+bool common_speculative_draft(common_speculative * spec) {
     if (spec == nullptr) {
-        return;
+        return true;
     }
 
     auto & dparams = spec->dparams;
@@ -3119,15 +3126,22 @@ void common_speculative_draft(common_speculative * spec) {
         }
 
         if (n_drafting == 0) {
-            return;
+            return true;
         }
     }
 
     for (auto & impl : spec->impls) {
         {
             common_time_meas tm(impl->t_draft_us, !impl->gen_perf);
+            impl->draft_error = false;
             impl->draft(dparams);
             impl->n_call_draft++;
+        }
+        if (impl->draft_error) {
+            for (auto & dp : dparams) {
+                dp.drafting = false;
+            }
+            return false;
         }
 
         int n_drafting = 0;
@@ -3188,6 +3202,7 @@ void common_speculative_draft(common_speculative * spec) {
             dp.drafting = false;
         }
     }
+    return true;
 }
 
 void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, uint16_t n_accepted) {

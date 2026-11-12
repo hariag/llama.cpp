@@ -5857,6 +5857,15 @@ static std::vector<c2w_state_slot> list_gen_state_slots(const clip_hparams & hpa
     }
 }
 
+// state slots of the streaming audio encoders
+static std::vector<c2w_state_slot> list_enc_state_slots(const clip_hparams & hparams, const clip_model & model) {
+    switch (model.proj_type) {
+        case PROJECTOR_TYPE_LFM3A:   return list_lfm3a_state_slots(hparams, model);
+        case PROJECTOR_TYPE_GEMMA4A: return list_gemma4a_state_slots(hparams, model);
+        default:                     return {};
+    }
+}
+
 // state_out can have another shape than its slot, only the byte size must match
 static void copy_gen_state_out(ggml_tensor * src, ggml_tensor * dst) {
     GGML_ASSERT(ggml_nbytes(src) == ggml_nbytes(dst));
@@ -5916,9 +5925,8 @@ const std::map<std::string, clip_gen_voice> & clip_gen_get_voices(const clip_ctx
 
 clip_enc_state * clip_enc_state_init(clip_ctx * ctx, int32_t n_frames_max) {
     const auto & hparams = ctx->model.hparams;
-    if (ctx->proj_type() == PROJECTOR_TYPE_LFM3A) {
-        // downsampler context, short-conv taps and attention window, see list_lfm3a_state_slots()
-        const auto slots = list_lfm3a_state_slots(hparams, ctx->model);
+    if (ctx->proj_type() == PROJECTOR_TYPE_LFM3A || ctx->proj_type() == PROJECTOR_TYPE_GEMMA4A) {
+        const auto slots = list_enc_state_slots(hparams, ctx->model);
         auto st = std::make_unique<clip_enc_state>();
         ggml_init_params params = {
             /*.mem_size   =*/ ggml_tensor_overhead() * slots.size(),
@@ -5986,6 +5994,10 @@ clip_enc_state * clip_enc_state_init(clip_ctx * ctx, int32_t n_frames_max) {
 
 void clip_enc_state_free(clip_enc_state * state) {
     delete state;
+}
+
+void clip_enc_state_reset(clip_enc_state * state) {
+    if (state && state->buf) ggml_backend_buffer_clear(state->buf.get(), 0);
 }
 
 size_t clip_cbx_read_tensor(struct clip_ctx * ctx, const char * name, float * out, size_t n_max) {
@@ -6123,6 +6135,28 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
             }
             ggml_backend_tensor_copy(slots[i++], get_inp_tensor(("state_in_" + slot.name).c_str()));
         }
+    };
+
+    // returns the "pos" slot; without a stream, the state is zero
+    auto set_enc_state_in = [&]() -> int {
+        const auto state_slots = list_enc_state_slots(hparams, model);
+        GGML_ASSERT(!state_slots.empty() && state_slots[0].name == "pos");
+        if (params->enc_state == nullptr) {
+            for (const auto & slot : state_slots) {
+                ggml_tensor * t = get_inp_tensor(("state_in_" + slot.name).c_str());
+                ggml_backend_tensor_memset(t, 0, 0, ggml_nbytes(t));
+            }
+            return 0;
+        }
+        const auto & slots = params->enc_state->slots;
+        GGML_ASSERT(slots.size() == state_slots.size());
+        float base_f = 0.0f;
+        ggml_backend_tensor_get(slots[0], &base_f, 0, sizeof(float));
+        size_t i = 0;
+        for (const auto & slot : state_slots) {
+            ggml_backend_tensor_copy(slots[i++], get_inp_tensor(("state_in_" + slot.name).c_str()));
+        }
+        return (int) base_f;
     };
 
     // lfm3a encoder and codec: causal sliding window over [cached window | this call]
@@ -7402,10 +7436,13 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
                 for (int i = 0; i < 2; i++) { n_pos = (n_pos - 1) / 2 + 1; }
 
                 // Chunked local attention: blocked causal mask and RPE
-                const int chunk_size   = 12;
-                const int max_past     = 12;
+                const int chunk_size   = clip_graph_gemma4a::chunk_size;
+                const int max_past     = clip_graph_gemma4a::max_past;
                 const int context_size = chunk_size + max_past;
                 const int num_blocks   = (n_pos + chunk_size - 1) / chunk_size;
+
+                // cached keys of a stream are at positions -n_hist .. -1
+                const int n_hist = std::min(set_enc_state_in(), max_past);
 
                 // Blocked causal attention mask: [context_size, chunk_size, num_blocks]
                 {
@@ -7415,7 +7452,7 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
                             int gq = b * chunk_size + q;
                             for (int k = 0; k < context_size; k++) {
                                 int gk = b * chunk_size - max_past + k;
-                                if (gq < n_pos && gk >= 0 && gk < n_pos && gk <= gq && (gq - gk) < max_past) {
+                                if (gq < n_pos && gk >= -n_hist && gk < n_pos && gk <= gq && (gq - gk) < max_past) {
                                     mask[k + q * context_size + b * context_size * chunk_size] = 0.0f;
                                 }
                             }
@@ -7522,24 +7559,7 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
                 GGML_ASSERT(imgs.entries.size() == 1);
                 const int n_pos = clip_n_output_tokens(ctx, &imgs.entries.front());
 
-                // the "pos" slot leads the state; without a stream the state is zero, the clip is encoded from its start
-                int base = 0;
-                if (params->enc_state != nullptr) {
-                    const auto & slots = params->enc_state->slots;
-                    float base_f = 0.0f;
-                    ggml_backend_tensor_get(slots[0], &base_f, 0, sizeof(float));
-                    base = (int) base_f;
-                    size_t i = 0;
-                    for (const auto & slot : list_lfm3a_state_slots(hparams, model)) {
-                        ggml_backend_tensor_copy(slots[i++], get_inp_tensor(("state_in_" + slot.name).c_str()));
-                    }
-                } else {
-                    for (const auto & slot : list_lfm3a_state_slots(hparams, model)) {
-                        ggml_tensor * t = get_inp_tensor(("state_in_" + slot.name).c_str());
-                        ggml_backend_tensor_memset(t, 0, 0, ggml_nbytes(t));
-                    }
-                }
-
+                const int base = set_enc_state_in();
                 set_lfm3a_window_inputs(base, n_pos, hparams.attn_window_size);
             } break;
         case PROJECTOR_TYPE_NEMOTRON_TRANSCRIBE:
@@ -8052,10 +8072,10 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
             }
         }
     }
-    if (params->enc_state != nullptr && model.proj_type == PROJECTOR_TYPE_LFM3A) {
+    if (params->enc_state != nullptr && (model.proj_type == PROJECTOR_TYPE_LFM3A || model.proj_type == PROJECTOR_TYPE_GEMMA4A)) {
         const auto & slots = params->enc_state->slots;
         size_t i = 0;
-        for (const auto & slot : list_lfm3a_state_slots(hparams, model)) {
+        for (const auto & slot : list_enc_state_slots(hparams, model)) {
             ggml_tensor * t = ggml_graph_get_tensor(gf, ("state_out_" + slot.name).c_str());
             GGML_ASSERT(t != nullptr);
             copy_gen_state_out(t, slots[i++]);

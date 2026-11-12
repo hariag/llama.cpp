@@ -274,6 +274,8 @@ struct clip_graph_muse_spark_audio : clip_graph {
 };
 
 struct clip_graph_gemma4a : clip_graph {
+    static constexpr int64_t chunk_size = 12;
+    static constexpr int64_t max_past = 12;
     clip_graph_gemma4a(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
     ggml_cgraph * build() override;
     ggml_tensor * build_mm(ggml_tensor * w, ggml_tensor * x) const override;
@@ -573,6 +575,7 @@ std::vector<c2w_state_slot> list_lfm3a_gen_state_slots(const clip_hparams & hpar
 
 // state slots of the streaming LFM3-Audio encoder (lfm3a)
 std::vector<c2w_state_slot> list_lfm3a_state_slots(const clip_hparams & hparams, const clip_model & model);
+std::vector<c2w_state_slot> list_gemma4a_state_slots(const clip_hparams & hparams, const clip_model & model);
 
 struct clip_graph_kimik25 : clip_graph {
     clip_graph_kimik25(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}

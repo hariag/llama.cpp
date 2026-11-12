@@ -156,7 +156,7 @@ static bool ggml_sycl_free_mem_enough(int device, size_t size, ggml_sycl_mem_typ
     // TODO: remove once zeMemAllocDevice refuses allocations beyond VRAM on BMG
     // (https://github.com/intel/compute-runtime/issues/1047). Only model/split buffers are checked.
     const gpu_arch arch = ggml_sycl_info().devices[device].hw_info.arch;
-    const bool is_bmg   = arch == gpu_arch::intel_gpu_bmg_g21 || arch == gpu_arch::intel_gpu_bmg_g31;
+    const bool is_bmg   = arch == gpu_arch::intel_gpu_bmg_g21 || ggml_sycl_is_bmg_g31(arch);
     const bool check    = g_ggml_sycl_bmg_vram_check && is_bmg && type == GGML_SYCL_MEM_BUFFER;
     const bool trace    = type == GGML_SYCL_MEM_BUFFER && ggml_sycl_memtrace_enabled();
     size_t free_mem = 0, total_mem = 0;

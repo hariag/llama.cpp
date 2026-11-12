@@ -164,6 +164,7 @@ struct mtmd_audio_preprocessor_granite_speech : mtmd_audio_preprocessor {
 };
 
 struct mtmd_audio_preprocessor_gemma4a : mtmd_audio_preprocessor {
+    static constexpr int segment_seconds = 30;
     mtmd_audio_preprocessor_gemma4a(const clip_ctx * ctx) : mtmd_audio_preprocessor(ctx) {}
     void initialize() override;
     bool process(const float * samples, size_t n_samples, std::vector<mtmd_audio_mel> & output, bool shape_only) const override;

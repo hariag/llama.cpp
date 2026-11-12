@@ -7,6 +7,7 @@
 #include "llama.h"
 #include "llama-cpp.h"
 #include "../src/llama-ext.h"
+#include "../src/llama-model.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -177,6 +178,7 @@ static void usage(char ** argv) {
     LOG("  -v <N>                   Set log verbosity level\n");
     LOG("  -b, --backend <backend>  Run only on the given backend device\n");
     LOG("  --kv-shift               Check K-shift against a decode at the shifted positions (CPU only)\n");
+    LOG("  --qwen4exp-mtp           Check a shared-weight standalone dense MTP head (CPU only)\n");
     LOG("  -h, --help               Show this help message\n\n");
     LOG("Examples:\n");
     LOG("  %s\n", argv[0]);
@@ -1780,6 +1782,145 @@ static int test_kv_shift(const std::string & arch_filter, const size_t seed, con
     return n_failed == 0 ? 0 : 1;
 }
 
+// Generate a small Qwen4Exp GGUF and split off a standalone MTP head with the
+// same shared-weight metadata used by real Flash-Next sidecars. This exercises
+// real model loading and graph execution rather than checking source text.
+static int test_qwen4exp_shared_mtp(const size_t seed, const float stdev) {
+    auto metadata = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 3);
+    gguf_set_val_u32(metadata.get(), "qwen4exp.nextn_predict_layers", 1);
+    const uint32_t ratios[] = { 4, 4, 0 }; // old converters use a dense MTP block
+    gguf_set_arr_data(metadata.get(), "qwen4exp.attention.compress_ratios", GGUF_TYPE_UINT32, ratios, 3);
+
+    llama_model_params mp = llama_model_default_params();
+    mp.load_mtp = true;
+    mp.n_gpu_layers = 0;
+    tensor_data_params tensor_params = { seed, stdev };
+    llama_model_ptr synthetic(llama_model_init_from_user(metadata.get(), set_tensor_data, &tensor_params, mp));
+    if (!synthetic) throw std::runtime_error("cannot synthesize qwen4exp model with MTP");
+
+    const auto fixture_dir = std::filesystem::temp_directory_path() /
+        ("test-qwen4exp-mtp-" + std::to_string(ggml_time_us()) + "-" + std::to_string(std::random_device{}()));
+    if (!std::filesystem::create_directory(fixture_dir)) throw std::runtime_error("cannot create fixture directory");
+    const std::string full_path   = (fixture_dir / "full.gguf").string();
+    const std::string target_path = (fixture_dir / "target.gguf").string();
+    const std::string draft_path  = (fixture_dir / "draft.gguf").string();
+    const std::string bad_path    = (fixture_dir / "wrong-shape.gguf").string();
+    llama_model_save_to_file(synthetic.get(), full_path.c_str());
+    synthetic.reset();
+
+    ggml_context * tensors_raw = nullptr;
+    gguf_init_params gp = { false, &tensors_raw };
+    gguf_context_ptr full(gguf_init_from_file(full_path.c_str(), gp));
+    ggml_context_ptr tensors(tensors_raw);
+    if (!full || !tensors) throw std::runtime_error("cannot read synthetic GGUF");
+    gguf_context_ptr target_gguf(gguf_init_empty());
+    gguf_context_ptr draft_gguf(gguf_init_empty());
+    gguf_set_kv(target_gguf.get(), full.get());
+    gguf_set_kv(draft_gguf.get(), full.get());
+    const bool recurrent[] = { true, false, false };
+    gguf_set_arr_data(target_gguf.get(), "qwen4exp.attention.recurrent_layers", GGUF_TYPE_BOOL, recurrent, 3);
+    gguf_set_arr_data(draft_gguf.get(), "qwen4exp.attention.recurrent_layers", GGUF_TYPE_BOOL, recurrent, 3);
+    gguf_set_arr_data(target_gguf.get(), "qwen4exp.attention.compress_ratios", GGUF_TYPE_UINT32, ratios, 3);
+    gguf_set_arr_data(draft_gguf.get(), "qwen4exp.attention.compress_ratios", GGUF_TYPE_UINT32, ratios, 3);
+    gguf_set_val_bool(draft_gguf.get(), "qwen4exp.nextn_shared_target_tensors", true);
+    // A standalone head does not include the trunk's PLE table or metadata.
+    for (int64_t i = gguf_get_n_kv(draft_gguf.get()) - 1; i >= 0; --i) {
+        std::string key = gguf_get_key(draft_gguf.get(), i);
+        if (key.find(".ple.") != std::string::npos || key == "qwen4exp.embedding_length_per_layer") {
+            gguf_remove_key(draft_gguf.get(), key.c_str());
+        }
+    }
+    for (int64_t i = 0; i < gguf_get_n_tensors(full.get()); ++i) {
+        const char * name = gguf_get_tensor_name(full.get(), i);
+        ggml_tensor * tensor = ggml_get_tensor(tensors.get(), name);
+        if (!tensor) throw std::runtime_error("missing synthetic tensor data");
+        // Exercise a target with a tied token embedding and output weight.
+        if (strncmp(name, "output.", 7) != 0) gguf_add_tensor(target_gguf.get(), tensor);
+        if (strncmp(name, "blk.2.", 6) == 0) gguf_add_tensor(draft_gguf.get(), tensor);
+    }
+    if (!gguf_write_to_file(target_gguf.get(), target_path.c_str(), false) ||
+        !gguf_write_to_file(draft_gguf.get(), draft_path.c_str(), false)) {
+        throw std::runtime_error("cannot write synthetic GGUF fixtures");
+    }
+    // An unrelated target with a different embedding width must be rejected.
+    gguf_set_val_u32(draft_gguf.get(), "qwen4exp.embedding_length", 128);
+    if (!gguf_write_to_file(draft_gguf.get(), bad_path.c_str(), false)) {
+        throw std::runtime_error("cannot write incompatible draft fixture");
+    }
+
+    llama_model_ptr target(llama_model_load_from_file(target_path.c_str(), mp));
+    if (!target || !target->tok_embd || !target->output) throw std::runtime_error("cannot load tied-output target");
+    llama_model_ptr without_target(llama_model_load_from_file(draft_path.c_str(), mp));
+    if (without_target) throw std::runtime_error("shared MTP head loaded without a target");
+    mp.model_shared = target.get();
+    llama_model_ptr wrong_shape(llama_model_load_from_file(bad_path.c_str(), mp));
+    if (wrong_shape) throw std::runtime_error("shared MTP head accepted an incompatible target");
+    llama_model_ptr draft(llama_model_load_from_file(draft_path.c_str(), mp));
+    if (!draft || draft->tok_embd != target->tok_embd || draft->output != target->output ||
+        draft->borrowed_model != target.get()) {
+        throw std::runtime_error("standalone MTP did not borrow target embeddings and tied output");
+    }
+
+    llama_context_params cp = llama_context_default_params();
+    cp.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+    cp.n_ctx = 64;
+    cp.n_batch = 8;
+    cp.n_ubatch = 8;
+    cp.n_threads = cp.n_threads_batch = 1;
+    llama_context_ptr ctx(llama_init_from_model(draft.get(), cp));
+    if (!ctx) throw std::runtime_error("cannot initialize dense MTP context");
+    std::unique_ptr<llama_batch_ext, decltype(&llama_batch_ext_free)> batch(llama_batch_ext_init(ctx.get()), llama_batch_ext_free);
+    int32_t idx = llama_batch_ext_add_token(batch.get(), 0, 1);
+    std::vector<float> state(256 * 4, 0.125f);
+    const llama_pos pos[4] = { 0, 0, 0, 0 };
+    if (idx < 0 || !llama_batch_ext_set_pos(batch.get(), idx, pos) ||
+        !llama_batch_ext_set_embd_state(batch.get(), idx, {state.data(), 1, state.size()}) ||
+        !llama_batch_ext_set_output_logits(batch.get(), idx, true) ||
+        llama_process(ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) != 0 ||
+        !llama_get_logits_ith(ctx.get(), 0)) {
+        throw std::runtime_error("dense shared MTP decode failed");
+    }
+    const float * logits = llama_get_logits_ith(ctx.get(), 0);
+    std::vector<float> draft_logits(logits, logits + 128);
+    for (int i = 0; i < 128; ++i) {
+        if (!std::isfinite(logits[i])) throw std::runtime_error("dense shared MTP produced non-finite logits");
+    }
+    // The same MTP block loaded with its full target model is the reference.
+    // It has identical layer weights, embedding, output and hidden input.
+    llama_context_ptr full_ctx(llama_init_from_model(target.get(), cp));
+    if (!full_ctx) throw std::runtime_error("cannot initialize reference MTP context");
+    std::unique_ptr<llama_batch_ext, decltype(&llama_batch_ext_free)> full_batch(
+        llama_batch_ext_init(full_ctx.get()), llama_batch_ext_free);
+    idx = llama_batch_ext_add_token(full_batch.get(), 0, 1);
+    if (idx < 0 || !llama_batch_ext_set_pos(full_batch.get(), idx, pos) ||
+        !llama_batch_ext_set_embd_state(full_batch.get(), idx, {state.data(), 1, state.size()}) ||
+        !llama_batch_ext_set_output_logits(full_batch.get(), idx, true) ||
+        llama_process(full_ctx.get(), LLAMA_PROCESS_TYPE_DECODE, full_batch.get()) != 0) {
+        throw std::runtime_error("reference dense MTP decode failed");
+    }
+    const float * ref_logits = llama_get_logits_ith(full_ctx.get(), 0);
+    if (!ref_logits) throw std::runtime_error("reference dense MTP produced no logits");
+    for (int i = 0; i < 128; ++i) {
+        if (!std::isfinite(ref_logits[i]) || std::fabs(draft_logits[i] - ref_logits[i]) > 1e-5f) {
+            throw std::runtime_error("shared MTP logits differ from the full target MTP");
+        }
+    }
+    full_batch.reset();
+    full_ctx.reset();
+    batch.reset();
+    ctx.reset();
+    draft.reset();
+    target.reset();
+    target_gguf.reset();
+    draft_gguf.reset();
+    full.reset();
+    tensors.reset();
+    for (const std::string & path : {full_path, target_path, draft_path, bad_path}) std::filesystem::remove(path);
+    std::filesystem::remove(fixture_dir);
+    LOG("PASS: qwen4exp shared tied-output dense MTP\n");
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     // init the logger at max verbosity. filter with a custom callback respecting the user-configure verbosity
     common_log_set_verbosity_thold(LOG_LEVEL_DEBUG);
@@ -1794,6 +1935,7 @@ int main(int argc, char ** argv) {
     std::string out;
     const char * target_backend = nullptr;
     bool kv_shift = false;
+    bool qwen4exp_mtp = false;
 
     int verbosity = LOG_LEVEL_ERROR;
 
@@ -1861,6 +2003,8 @@ int main(int argc, char ** argv) {
                 usage(argv);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--qwen4exp-mtp") == 0) {
+            qwen4exp_mtp = true;
         } else if (strcmp(argv[i], "--kv-shift") == 0) {
             kv_shift = true;
         } else {
@@ -1878,6 +2022,9 @@ int main(int argc, char ** argv) {
     init_normal_pool(seed, stdev);
 
     try {
+        if (qwen4exp_mtp) {
+            return test_qwen4exp_shared_mtp(seed, stdev);
+        }
         if (!out.empty()) {
             return save_models(arch_filter, seed, stdev, verbosity, out);
         }

@@ -197,7 +197,7 @@
         {%- set ns.prev_message_type = None -%}
 
             {%- if message['tool_calls'] -%}
-                {#- Preserve reasoning between tool calls for model turns that come after the last user turn -#} 
+                {#- Preserve reasoning between tool calls for model turns that come after the last user turn -#}
                 {%- if message['reasoning_content'] and loop.index0 > ns.last_user_message -%}
                   {{- '<|channel>thought\n' -}}
                   {{- message['reasoning_content'] -}}

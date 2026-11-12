@@ -5443,6 +5443,23 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 return 1;
             }
 
+            if (!with_bias && src0->type == GGML_TYPE_NVFP4 && src1->type == GGML_TYPE_F32 && mm_node->type == GGML_TYPE_F32) {
+                const int cc = ggml_cuda_info().devices[cuda_ctx->device].cc;
+                const bool is_id = op == GGML_OP_MUL_MAT_ID;
+                const int64_t ncols = is_id ? src1->ne[2] : src1->ne[1];
+                const bool use_mmvq = is_id ? ncols <= get_mmvq_mmid_max_batch(src0->type, cc) :
+                                            ggml_cuda_should_use_mmvq(src0->type, cc, ncols);
+                const bool bad_padding_clear = ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE &&
+                                               ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) &&
+                                               src0->view_src;
+                if (!use_mmvq && !bad_padding_clear &&
+                        ggml_cuda_should_use_mmq(src0->type, cc, ncols, /*n_experts =*/ is_id ? src0->ne[2] : 0)) {
+                    fusion_data.prec_src1 = ggml_prec_get_src(mm_node, 1);
+                    ggml_cuda_mul_mat_q(*cuda_ctx, src0, src1, ids, out_node, &fusion_data);
+                    return n_ops - 1;
+                }
+            }
+
             if (ggml_cuda_should_fuse_mul_mat_vec_q(mm_node)) {
                 ggml_cuda_mul_mat_vec_q(*cuda_ctx, src0, src1, ids, out_node, &fusion_data);
                 fused_mul_mat_vec = true;
@@ -6798,6 +6815,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_IQ1_S:
                     case GGML_TYPE_IQ1_M:
                     case GGML_TYPE_IQ4_XS:
+                    case GGML_TYPE_MXFP8:
                         return true;
                     case GGML_TYPE_IQ4_NL:
                     case GGML_TYPE_MXFP4:

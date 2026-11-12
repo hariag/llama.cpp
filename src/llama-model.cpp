@@ -1807,6 +1807,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
         // call the per-model loading function
         load_arch_tensors(ml);
+        borrowed_model = ml.borrowed_shared_tensor ? ml.model_shared : nullptr;
 
         // generic pass: load optional per-tensor/per-expert ".scale" tensors (e.g. NVFP4 scale2)
         // this avoids having to add scale loading to every architecture
@@ -1970,6 +1971,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             if (!output_in_s && (ml.get_weight(tn(LLM_TENSOR_OUTPUT, "input_scale").str().c_str()) ||
                                  gguf_find_tensor(ml.metadata, tn(LLM_TENSOR_OUTPUT, "input_scale").str().c_str()) >= 0)) {
                 output_in_s = create_tensor(tn(LLM_TENSOR_OUTPUT, "input_scale"), {1}, TENSOR_NOT_REQUIRED);
+            }
+            if (ml.borrowed_shared_output) {
+                // The output weight and its quantization scales belong to the
+                // same target model. A draft override would silently change
+                // the borrowed weight's meaning, so reject it.
+                if (output_s || output_in_s) {
+                    throw std::runtime_error("a borrowed output weight cannot use draft-owned output scales");
+                }
+                output_s = ml.model_shared->output_s;
+                output_in_s = ml.model_shared->output_in_s;
             }
         }
     }
@@ -3276,7 +3287,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 const bool mtp_on_hybrid_qwen =
                     params.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
                     (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE ||
-                     arch == LLM_ARCH_BAILINGMOE3 || arch == LLM_ARCH_QWEN4EXP);
+                     arch == LLM_ARCH_BAILINGMOE3);
 
                 const bool mtp_on_hybrid_nemotron =
                     params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && arch == LLM_ARCH_NEMOTRON_H_MOE;
@@ -4008,6 +4019,10 @@ bool llama_model_is_diffusion(const llama_model * model) {
 
 const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_tensor_map(const llama_model * model) {
     return model->tensors_by_name;
+}
+
+ggml_tensor * llama_internal_get_output_tensor(const llama_model * model) {
+    return model->output;
 }
 
 int32_t llama_model_n_expert(const struct llama_model * model) {

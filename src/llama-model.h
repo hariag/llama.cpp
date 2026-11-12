@@ -766,6 +766,9 @@ struct llama_rope_params {
 };
 
 struct llama_model {
+    // Non-owning target which supplies missing draft weights. It must outlive
+    // this model as required by llama_model_params::model_shared.
+    const llama_model * borrowed_model = nullptr;
     llm_type type = LLM_TYPE_UNKNOWN;
     llm_arch arch = LLM_ARCH_UNKNOWN;
 
@@ -1112,3 +1115,4 @@ const char * llm_type_name(llm_type type);
 // For internal test use
 // TODO: remove
 const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_tensor_map(const llama_model * model);
+ggml_tensor * llama_internal_get_output_tensor(const llama_model * model);
