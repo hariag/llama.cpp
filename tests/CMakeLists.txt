@@ -144,6 +144,10 @@ add_executable(test-sycl-arch-compat test-sycl-arch-compat.cpp)
 target_compile_features(test-sycl-arch-compat PRIVATE cxx_std_17)
 llama_test(test-sycl-arch-compat LABEL behavior)
 
+add_executable(test-sycl-event-compat test-sycl-event-compat.cpp)
+target_compile_features(test-sycl-event-compat PRIVATE cxx_std_17)
+llama_test(test-sycl-event-compat LABEL behavior)
+
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-bert-bge        LABEL behavior  ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-bert-bge.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-command-r       LABEL behavior  ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-command-r.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-deepseek-coder  LABEL behavior  ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-deepseek-coder.gguf)

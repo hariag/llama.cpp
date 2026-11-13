@@ -10,6 +10,7 @@
 #include "fattn-common.hpp"
 #include "convert.hpp"
 #include "fattn.hpp"
+#include "sycl-event-compat.hpp"
 
 #include <oneapi/mkl.hpp>
 #include <cstdio>
@@ -589,7 +590,7 @@ void ggml_sycl_flash_attn_ext_mkl(ggml_backend_sycl_context & ctx, ggml_tensor *
                             Q_head_f16_ptr + (int64_t)q0 * DKQ, DKQ,
                             beta,
                             KQ_f32_ptr, this_chunk,
-                            std::vector<sycl::event>{*stream->ext_oneapi_get_last_event()});
+                            ggml_sycl_last_event_dependencies<sycl::event>(stream->ext_oneapi_get_last_event()));
                         MKL_ACCUM(gemm_kq_time_us, t0);
                     }
                     // Online softmax over this chunk for this query tile
@@ -618,7 +619,7 @@ void ggml_sycl_flash_attn_ext_mkl(ggml_backend_sycl_context & ctx, ggml_tensor *
                             S_f16_ptr, this_chunk,
                             beta,
                             VKQ_chunk_ptr, DV,
-                            std::vector<sycl::event>{*stream->ext_oneapi_get_last_event()});
+                            ggml_sycl_last_event_dependencies<sycl::event>(stream->ext_oneapi_get_last_event()));
                         MKL_ACCUM(gemm_vkq_time_us, t0);
                     }
                     // VKQ_accum[q0..] += VKQ_chunk

@@ -79,7 +79,13 @@ static __global__ void rwkv_wkv7_f32(const int B, const int T, const int C, cons
     float state[head_size];
     __shared__ float _r[head_size], _w[head_size], _k[head_size], _a[head_size], _b[head_size];
 
+    // MUSA 4.2 can fail instruction selection after fully unrolling the
+    // 128-element private state load. Keep the loop on that backend.
+    #if defined(GGML_USE_MUSA)
+    #pragma unroll 1
+    #else
     #pragma unroll
+    #endif
     for (int i = 0; i < head_size; i++) {
         state[i] = s[batch_i * state_size + head_i * head_size * head_size + tid * head_size + i];
     }
