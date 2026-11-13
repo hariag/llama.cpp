@@ -1,5 +1,4 @@
 #include <sycl/sycl.hpp>
-#include <sycl/ext/oneapi/work_group_static.hpp>
 #include "dpct/helper.hpp"
 #include "common.hpp"
 #include "fattn-common.hpp"

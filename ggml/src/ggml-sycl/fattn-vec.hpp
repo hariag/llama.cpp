@@ -2,7 +2,7 @@
 #define GGML_SYCL_FATTN_VEC_HPP
 
 #include <sycl/sycl.hpp>
-#include <sycl/ext/oneapi/work_group_static.hpp>
+#include "sycl-local-memory-compat.hpp"
 #include <iostream>
 #include <iomanip>
 
@@ -144,9 +144,9 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
     constexpr size_t lsm_size3 = (ne_KQ > ne_combine ? ne_KQ : ne_combine);
     constexpr size_t local_share_mem_size = (lsm_size1 + lsm_size2)*sizeof(float) + lsm_size3*sizeof(sycl::half);
 
-    syclex::work_group_static<char[local_share_mem_size]> lsm;
+    GGML_SYCL_LOCAL_STORAGE(lsm, local_share_mem_size, item_ct1);
 
-    float *KQ_max_shared = (float *)&lsm;
+    float *KQ_max_shared = (float *)lsm_ptr;
     float *KQ_sum_shared = KQ_max_shared+lsm_size1;
     sycl::half* KQ = (sycl::half*)(KQ_sum_shared + lsm_size2);
 
@@ -158,8 +158,8 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
     constexpr size_t local_share_mem_size = (lsm_size1 + lsm_size2 + lsm_size3)*sizeof(float);
 
 
-    syclex::work_group_static<char[local_share_mem_size]> lsm;
-    float *KQ_max_shared = (float *)&lsm;
+    GGML_SYCL_LOCAL_STORAGE(lsm, local_share_mem_size, item_ct1);
+    float *KQ_max_shared = (float *)lsm_ptr;
     float *KQ_sum_shared = KQ_max_shared+lsm_size1;
     float* KQ = KQ_sum_shared + lsm_size2;
 

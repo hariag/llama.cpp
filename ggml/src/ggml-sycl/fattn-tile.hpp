@@ -1,5 +1,5 @@
 #include <sycl/sycl.hpp>
-#include <sycl/ext/oneapi/work_group_static.hpp>
+#include "sycl-local-memory-compat.hpp"
 #include "dpct/helper.hpp"
 #include "common.hpp"
 #include "fattn-common.hpp"
@@ -769,9 +769,9 @@ static void flash_attn_tile(const char *  Q,
                                             lsm_size3 * sizeof(sycl::half) +
                                             lsm_size4 * sizeof(float);
 
-    syclex::work_group_static<char[local_share_mem_size]> lsm;
+    GGML_SYCL_LOCAL_STORAGE(lsm, local_share_mem_size, item_ct1);
 
-    sycl::half2 *Q_tmp = (sycl::half2 *)&lsm;
+    sycl::half2 *Q_tmp = (sycl::half2 *)lsm_ptr;
     sycl::half2 *KV_tmp = (sycl::half2*)(Q_tmp +lsm_size1);
     sycl::half *KQ = (sycl::half *)(KV_tmp+lsm_size2);
     float *KQ_max_new_shared = (float *)(KQ+lsm_size3);
@@ -787,9 +787,9 @@ static void flash_attn_tile(const char *  Q,
 
     constexpr size_t local_share_mem_size = (lsm_size1 + lsm_size2 +lsm_size3 + lsm_size4) * sizeof(float);
 
-    syclex::work_group_static<char[local_share_mem_size]> lsm;
+    GGML_SYCL_LOCAL_STORAGE(lsm, local_share_mem_size, item_ct1);
 
-    float *Q_tmp = (float *)&lsm;
+    float *Q_tmp = (float *)lsm_ptr;
     float *KV_tmp = Q_tmp +lsm_size1;
     float *KQ = KV_tmp+lsm_size2;
     float *KQ_max_new_shared = KQ+lsm_size3;

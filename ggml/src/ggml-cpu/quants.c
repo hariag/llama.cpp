@@ -776,6 +776,11 @@ void ggml_vec_dot_q4_K_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, c
         memset(aux32, 0, 8*sizeof(int32_t));
         int8_t * GGML_RESTRICT a = aux8;
         for (int j = 0; j < QK_K/64; ++j) {
+#if defined(__clang__) && __clang_major__ == 15 && defined(__AVX512F__)
+            // DTK 25.04's clang 15 crashes selecting an AVX-512 shuffle when
+            // this loop is fully unrolled. Keep vectorization enabled.
+#pragma clang loop unroll(disable)
+#endif
             for (int l = 0; l < 32; ++l) a[l] = (int8_t)(q4[l] & 0xF);
             a += 32;
             for (int l = 0; l < 32; ++l) a[l] = (int8_t)(q4[l]  >> 4);
